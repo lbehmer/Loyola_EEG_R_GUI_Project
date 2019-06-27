@@ -1,0 +1,203 @@
+---
+title: "Summer EEG R Code Project"
+author: "Lawrence Behmer"
+date: "Tuesday, June 18, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = normalizePath("D:/EEGlab/EEGData"))
+```
+
+
+```{r}
+library(afex)
+library(plyr)
+library(ggplot2)
+require(pander)
+require(knitr)
+require(xtable)
+require(Hmisc)
+require(ez)
+require(schoRsch)
+library(signal)
+library(R.matlab)
+library(stringr)
+library(Crump)
+
+#Open up some empty data frames. Note that this needs to be done outside of the loop, and you'll need to make sure your names reflect the bandwidth you're extracting.
+
+All_FRONTAL_GAMMA_EEG<-data.frame()
+GAMMA_EEG<-data.frame()
+tempEEG<-data.frame()
+GAMMA_BDF<-data.frame()
+
+
+#sci notation = off
+options(scipen=999)
+options(warn=-1)
+
+
+#In the following snippet of script, I create a new event trigger data frame which I will insert into the EEG data at a latter step. Note that you will need to create _EVENTS.csv files in MATLAB. I typically save them using the convention S1_EVENTS.csv, S2_EVENTS.csv, etc. As you can see in line 46, it takes whatever subject number you're at in the loop, and pastes it into a string that is the file name.
+
+List2<-c(2,3,4,5,6,7,8,9,10,11,12,14,15,16,17,19,20,22,24,25,27,28,29,30,31,33,34) #These are the subject ID codes
+
+for (j in List2){
+TrigData<-data.frame()
+
+List<-paste("S",j,"_BETA.mat",sep="")#This opens the .mat files later in the code. Note that you'll need to change the bandwidth name
+
+
+for(i in j) {
+    
+  infile <- paste("S",i,"_EVENTS.csv",sep="") #Uses the integer from your loop counter to create a file name to open
+  
+  test<-scan(file=infile, skip=1,what = "character",blank.lines.skip = TRUE, sep = " ")#Open up all of the data, one line at a time. It's comma delimited. It's a good idea to run this line by itself, and then type "test" in the console window, so you can see exactly how the code opens the data. When it comes to the event files that come from EEG lab, the second value is a trigger value, the third value is the time the trigger occured (in seconds), and the sixth value value is the trial number
+  
+  for(line in seq(1:length(test))){ #A simple loop that goes through each line of the data until the end of the file
+    data<-unlist(strsplit(test[line],split="\t")) #each "row" of the data was seperated by a tab when it was collected.  This line simply tells r that this portion of the data is tab delimited
+    
+    
+    Subject<-rep(i,length(line)) #For the length of the "test"" file, create a subject number column that corresponds with your loop value from line 44
+    Type<-rep(data[2],length(line)) #Unpack the trigger values
+    Latency<-rep(data[3],length(line)) #Unpack the time vaules
+    Latency<-as.numeric(Latency) #Make sure they are stored as numerics
+    Epoch<-rep(data[6],length(line)) #Unpack the trial numbers
+    
+    #Put the data into a temporary data frame
+    tempData<-data.frame(Subject,Type,Latency,Epoch)
+    
+    #Bind it to the main data frame
+    TrigData<-rbind(TrigData,tempData)
+    
+    }
+  }
+
+#So, here I want to start the process of creating individual dsicrete time bins for each trial (so, starting at time 0 for the onset of the trial, and ending at some other value (in seconds) when the trial is completed). What it's doing is going through or TrigData DF, and saying if the Type is 1, 2, or 3, then that marks the onset of a trial, so set that time at 0 seconds. If it's anything other than 1, 2, or 3, then take the latency value for where you're at in the loop, and subtract from it the previou latency value. All of this gets stored in a varaible named IKSIs
+
+IKSIs<-c()
+for(q in 1:length(TrigData$Type)){
+  if(TrigData$Type[q]%in%c("1","2","3")){
+    indexes<-q
+    IKSIs[indexes]<-c(0)
+    }else{
+      indexes<-q
+      IKSIs[indexes]<-TrigData$Latency[q]-TrigData$Latency[q-1]
+      }
+  }
+
+# Here, we're organizing the triggers. Note that this step can be different, depending on the design of the study. In this case, a trigger marker of 111 indicated a corect response. Also, triggers 1 and 2 were meant to be analyzed as if they were the same condition. So, what I'm doing is making new triggers based on condition and correct response. So, if the trigger was 111 (a correct response) and the previous trigger was a 1 (some type of trial desgnation), create a new trigger code of 1111 for all trials meeting that criteria and store them in a variable named Condition
+
+Condition<-c()
+for(q in 1:length(TrigData$Type)){
+  if(TrigData$Type[q]%in%c("111") && TrigData$Type[q-1]%in%c("1")){
+    indexes<-q
+    Condition[indexes]<-c("1111")
+    }else if (TrigData$Type[q]%in%c("111") && TrigData$Type[q-1]%in%c("2")){
+      indexes<-q
+      Condition[indexes]<-c("1111")
+      }else if (TrigData$Type[q]%in%c("111") && TrigData$Type[q+1]%in%c("3")){
+        indexes<-q
+        Condition[indexes]<-c("2111")
+        }else{
+          indexes<-q
+          Condition[indexes]<-c("0")
+          }
+  }
+
+#Cange the scale of time from seconds to milliseconds
+IKSIs<-IKSIs*1000
+IKSIs[is.na(IKSIs)] <- 0 #Can't recall why I have this line, but ut must be important
+
+
+RunTime<-c()
+for(q in 1:length(IKSIs)){
+  if(IKSIs[q]==c(0)){
+    indexes<-q
+    RunTime[indexes]<-c(0)
+    }else if(IKSIs[q-1]==c(0)){
+      indexes<-q
+      RunTime[indexes]<-IKSIs[q]+IKSIs[q-1]
+      }else{
+        indexes<-q
+        RunTime[indexes]<-IKSIs[q]+RunTime[indexes-1]
+      }
+  }
+
+
+TrigData<-cbind(TrigData,IKSIs,RunTime,Condition)
+NewDF<-TrigData
+
+GAMMA_BDF<-rbind(GAMMA_BDF,NewDF)
+
+
+EEGData<-data.frame() #Create a dataframe to put the data into
+
+for (e in List){
+  
+  data<-readMat(e) #Read in the MATLAB data
+  
+  SubSplit<-strsplit(e,split="_") #Split the file into strings deliminated by an underscore
+  
+  Trial<-as.numeric(unlist(data[1])) #Unpack the number of trials
+  i<-length(Trial) #Create a variable that stores the total number of trials
+  Trial<-rep(Trial,each=200) #Repeat each trial value 200 times
+  
+  Time<-as.numeric(unlist(rep(data[4],i))) #Unpack the time data for each individual trial, times the total number of trials. So, each trial has 200 time points, starting with some value prior to the onset of the trial (typicall a negative value in ms) and ending at the end of the discrete epoch. This is always the same for every trial
+  Time<-round(Time,digits=0) #round everything to whole numbers
+  
+  ERD<-as.vector(t(unlist(data[3]))) #Unpack the actual EEG data
+  
+  Band<-rep(c("GAMMA"),i*200) #Create a variable for the bandwidth (number of trials times 200)
+  
+  Subject<-(unlist(SubSplit)) #Use the Subsplit variable to create a variable desigating subject
+  Subject<-as.character(rep(Subject[1],i*200)) #Take the first part of this variable (Which will be S___) and repeate it i * 200 times
+  
+  tempData<-data.frame(Subject,Trial,Band,Time,ERD) #Store everything in a temp data frame
+  
+  EEGData<-rbind(tempData,EEGData) #Append the temp data to the permanent data
+  EEGData<-EEGData[with(EEGData, order(Trial)),] #Make sure everything is organized in order by trial
+  }
+
+
+EEGData$Trial<-match(EEGData$Trial, unique(EEGData$Trial)) #Can't recall why this is here, but it must have solved some problem I had
+
+EEGData$ERD<-EEGData$ERD+2.5 #No idea why, but the EEG data you get export of MATLAB is 2.5 db lower than what it really is. So, here we add 2.5 db to all of the EEG data
+All_FRONTAL_GAMMA_EEG<-rbind(All_FRONTAL_GAMMA_EEG,EEGData) #Store it all in the final DF
+
+#NOTE as of this stage, your data is set up to be analyzed based on the onset of the trial. Just loop through all of your data using this middle chunk of code, and you can start using the pylr function to make tables and do stats. If you want to take this same data and response lock it, then continue...
+
+EEGMatrix<-matrix(EEGData$ERD,ncol=200,byrow=T) #This takes all of your EEG data for each trial and splits it into rows. If you open this matrix in the workspace, you should notice that each row is all of the EEG data for a trial starting from the first time point of the trial to the last, and total number of rows you have reflects the total number of trials
+TimeMatrix<-matrix(EEGData$Time,ncol=200,byrow=T) #Same as above, but for time
+
+#So, this next snippet of code is going to create a matrix of response locked data
+EEGResponseLockedWindow<-matrix(rep(0,dim(NewDF)[1]*40),ncol=40) #Creates a matrix of 40 time points by the number of lines from your New DF data frame
+window<-10
+
+for(i in 1:dim(NewDF)[1]){
+
+trial<-i #trial counter
+timestamp<-NewDF$RunTime[i] #What time the trigger occurs
+curTrial<-as.integer(NewDF$Epoch[i])
+test<-TimeMatrix[curTrial,] #Creates a variable that stores the time points of a trial
+
+closest<-test[test>=timestamp][1] #Determines which value in the test variable the time stamp is closest to
+indexofClosest<-which(test%in%closest) #Returns the value of that closest time point as its corresponding number between 1 and 200
+if((timestamp+(window*20))>max(test)){ #If the trigger falls outside of the range of our data, don't include it
+}else{
+EEGResponseLockedWindow[i,]<-EEGMatrix[curTrial,(indexofClosest-19):(indexofClosest+20)] #Otherwise, store the data! So this will isolate 40 time points of data if the trial is good, with the mid point being the onset of the response
+}
+}
+
+tempEEG<-cbind(NewDF,EEG=EEGResponseLockedWindow) #bind this response locked matrix to your data frame
+tempEEG<-tempEEG[tempEEG$EEG.1%in%c(0)==FALSE,] #Not sure why I have this. Looks like I must have ran into a problem if the value in that first column of the EEG matrix was 0
+
+tempEEG$Epoch<-as.numeric(tempEEG$Epoch)
+
+GAMMA_EEG<-rbind(GAMMA_EEG,tempEEG) #Save everything in a data frame. Now you're ready to analyze the data
+
+#Save everything
+save(All_FRONTAL_GAMMA_EEG,file="All_FRONTAL_GAMMA_EEG.rds")
+save(GAMMA_EEG,file="GAMMA_EEG.rds")
+save(GAMMA_BDF,file="GAMMA_BDF.rds")
+}
